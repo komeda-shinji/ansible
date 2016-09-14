@@ -27,12 +27,13 @@ NET_PASSWD_RE = re.compile(r"[\r\n]?password: $", re.I)
 
 NET_COMMON_ARGS = dict(
     host=dict(required=True),
-    port=dict(default=22, type='int'),
+    port=dict(type='int'),
     username=dict(fallback=(env_fallback, ['ANSIBLE_NET_USERNAME'])),
     password=dict(no_log=True, fallback=(env_fallback, ['ANSIBLE_NET_PASSWORD'])),
     ssh_keyfile=dict(fallback=(env_fallback, ['ANSIBLE_NET_SSH_KEYFILE']), type='path'),
     authorize=dict(default=False, fallback=(env_fallback, ['ANSIBLE_NET_AUTHORIZE']), type='bool'),
     auth_pass=dict(no_log=True, fallback=(env_fallback, ['ANSIBLE_NET_AUTH_PASS'])),
+    method=dict(type='str', default='ssh', choices=['ssh', 'telnet']),
     provider=dict(),
     timeout=dict(default=10, type='int')
 )
@@ -70,17 +71,34 @@ class Cli(object):
 
     def connect(self, **kwargs):
         host = self.module.params['host']
-        port = self.module.params['port'] or 22
+        method = self.module.params['method'] or 'ssh'
+        if method == 'telnet':
+            port = self.module.params['port'] or 23
+        else:
+            port = self.module.params['port'] or 22
 
         username = self.module.params['username']
         password = self.module.params['password']
         key_filename = self.module.params['ssh_keyfile']
         timeout = self.module.params['timeout']
+        prompts = {}
+        if kwargs.has_key('prompt_user'):
+            prompts['prompt_user'] = kwargs['prompt_user']
+        elif self.module.params.has_key('prompt_user'):
+            prompts['prompt_user'] = self.module.params['prompt_user']
+        if kwargs.has_key('prompt_passwd'):
+            prompts['prompt_passwd'] = kwargs['prompt_passwd']
+        elif self.module.params.has_key('prompt_passwd'):
+            prompts['prompt_passwd'] = self.module.params['prompt_passwd']
 
         try:
-            self.shell = Shell(kickstart=False, prompts_re=CLI_PROMPTS_RE, errors_re=CLI_ERRORS_RE)
-            self.shell.open(host, port=port, username=username, password=password, key_filename=key_filename, timeout=timeout)
-        except ShellError:
+	    if method == 'telnet':
+		self.shell = Telnet()
+                self.shell.open(host, port=port, username=username, password=password, **prompts)
+	    else:
+                self.shell = Shell(kickstart=False, prompts_re=CLI_PROMPTS_RE, errors_re=CLI_ERRORS_RE)
+                self.shell.open(host, port=port, username=username, password=password, key_filename=key_filename, timeout=timeout)
+        except (ShellError, TelnetError):
             e = get_exception()
             msg = 'failed to connect to %s:%s - %s' % (host, port, str(e))
             self.module.fail_json(msg=msg)
@@ -92,10 +110,19 @@ class Cli(object):
     def send(self, commands):
         try:
             return self.shell.send(commands)
-        except ShellError:
+        except (ShellError, TelnetError):
             e = get_exception()
             self.module.fail_json(msg=e.message, commands=commands)
 
+    def receive(self):
+        try:
+            return self.shell.receive()
+        except (ShellError, TelnetError):
+            e = get_exception()
+            self.module.fail_json(msg=e.message, commands=commands)
+
+    def close(self):
+        return self.shell.close()
 
 class NetworkModule(AnsibleModule):
 
@@ -128,6 +155,7 @@ class NetworkModule(AnsibleModule):
 
         self.connection.connect()
         self.connection.send('terminal length 0')
+        self.connection.receive()
 
         if self.params['authorize']:
             self.connection.authorize()
@@ -170,7 +198,9 @@ def get_module(**kwargs):
 
     module = NetworkModule(**kwargs)
 
-    if not HAS_PARAMIKO:
+    # HAS_PARAMIKO is set by module_utils/shell.py
+    method = module.params['method'] or 'ssh'
+    if method == 'ssh' and not HAS_PARAMIKO:
         module.fail_json(msg='paramiko is required but does not appear to be installed')
 
     return module
